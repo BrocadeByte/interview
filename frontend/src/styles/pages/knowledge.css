@@ -1,0 +1,145 @@
+.knowledge-layout {
+  display: grid;
+  grid-template-columns: 330px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.knowledge-sidebar {
+  max-height: calc(100vh - 200px);
+  overflow: auto;
+  padding: 14px;
+}
+
+.sidebar-actions {
+  position: sticky;
+  z-index: 2;
+  top: -14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 14px 0 12px;
+  margin-top: -14px;
+  background: #fff;
+}
+
+.knowledge-item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.knowledge-item:hover {
+  background: var(--surface-subtle);
+}
+
+.knowledge-item.active {
+  background: var(--primary-soft);
+  border-color: #bfdbfe;
+}
+
+.knowledge-item span,
+.knowledge-item small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-item span {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.knowledge-item small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.knowledge-editor {
+  padding: 18px 22px 22px;
+}
+
+.knowledge-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+}
+
+.editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 12px;
+}
+
+.upload-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.knowledge-editor .el-upload,
+.knowledge-editor .el-upload-dragger {
+  width: 100%;
+}
+
+.task-panel-header,
+.ingestion-task-row,
+.task-actions {
+  display: flex;
+  align-items: center;
+}
+
+.task-panel-header {
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ingestion-task-row {
+  gap: 12px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.task-main {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.task-main strong,
+.task-main small,
+.task-error {
+  overflow-wrap: anywhere;
+}
+
+.task-main small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-error {
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.task-actions {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+

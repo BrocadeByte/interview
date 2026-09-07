@@ -1,0 +1,10 @@
+@import './styles/base.css';
+@import './styles/layout.css';
+@import './styles/pages/auth.css';
+@import './styles/pages/interview-home.css';
+@import './styles/pages/profile.css';
+@import './styles/pages/interview.css';
+@import './styles/pages/reports.css';
+@import './styles/pages/knowledge.css';
+@import './styles/element-plus.css';
+@import './styles/responsive.css';

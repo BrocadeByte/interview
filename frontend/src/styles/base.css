@@ -1,0 +1,129 @@
+:root {
+  color-scheme: light;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --primary: #1d4ed8;
+  --primary-hover: #1e40af;
+  --primary-soft: #eff6ff;
+  --success: #047857;
+  --success-soft: #ecfdf5;
+  --warning: #9a5700;
+  --warning-soft: #fffbeb;
+  --danger: #dc2626;
+  --ink: #17202e;
+  --text: #344054;
+  --muted: #667085;
+  --line: #e4e7ec;
+  --line-strong: #d0d5dd;
+  --surface: #ffffff;
+  --surface-subtle: #f8fafc;
+  --page: #f3f5f8;
+  --shadow-sm: 0 1px 2px rgb(16 24 40 / 4%), 0 5px 16px rgb(16 24 40 / 3%);
+  --shadow-md: 0 18px 45px rgb(16 24 40 / 11%);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --page-gutter: 24px;
+  --content-gutter: var(--page-gutter);
+  --topbar-height: 72px;
+  --mobile-nav-height: 64px;
+  --el-color-primary: #1d4ed8;
+  --el-color-primary-light-3: #4f75dc;
+  --el-color-primary-light-5: #8ca6e8;
+  --el-color-primary-light-7: #c4d2f4;
+  --el-color-primary-light-8: #dce6f9;
+  --el-color-primary-light-9: #eff6ff;
+  --el-color-success: #047857;
+  --el-color-warning: #9a5700;
+  --el-border-radius-base: 9px;
+  --el-border-color: #d0d5dd;
+  --el-border-color-light: #e4e7ec;
+  --el-text-color-primary: #17202e;
+  --el-text-color-regular: #344054;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+html {
+  background: var(--page);
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  overflow-x: hidden;
+  color: var(--text);
+  background: var(--page);
+  font-family: Inter, "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+:where(button, a, summary, [role="button"], [tabindex]:not([tabindex="-1"])):focus-visible {
+  outline: 2px solid #475467 !important;
+  outline-offset: 3px !important;
+}
+
+:where(input, textarea, select):focus-visible {
+  outline: none !important;
+}
+
+a {
+  color: var(--primary);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+li,
+dd,
+dt {
+  overflow-wrap: anywhere;
+}
+
+h1,
+h2,
+h3 {
+  color: var(--ink);
+  letter-spacing: 0;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  text-wrap: balance;
+}
+
+.eyebrow {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0;
+  line-height: 1.4;
+}
+
+.eyebrow-light {
+  color: #93c5fd;
+}
+
