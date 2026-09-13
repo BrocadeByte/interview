@@ -4,6 +4,8 @@ from typing import Any, TypeVar
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ValidationError
 
+from app.services.llm_service import bind_json_output
+from app.services.llm_usage import observe_llm
 from app.services.prompt_security import secure_system_prompt
 
 
@@ -50,6 +52,7 @@ async def parse_json_object_with_repair(
     llm: Any,
     expected_schema: str,
     max_retries: int = 1,
+    observation_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """解析模型输出；失败时调用 LLM 按预期结构修复，并在重试耗尽后抛出原异常。"""
     last_error: Exception | None = None
@@ -73,7 +76,8 @@ async def parse_json_object_with_repair(
 需要修复的原始输出：
 {raw_content}
 """.strip()
-            repaired = await llm.ainvoke([
+            repair_llm = _observed_repair_llm(llm, attempt + 1, observation_context)
+            repaired = await repair_llm.ainvoke([
                 SystemMessage(content=secure_system_prompt(REPAIR_SYSTEM_PROMPT)),
                 HumanMessage(content=repair_prompt),
             ])
@@ -90,6 +94,7 @@ async def parse_json_model_with_repair(
     llm: Any,
     output_model: type[LlmOutputT],
     max_retries: int = 1,
+    observation_context: dict[str, Any] | None = None,
 ) -> LlmOutputT:
     """解析并校验模型返回的 JSON 对象，默认在语法或结构校验失败后尝试一次修复。"""
     last_error: Exception | None = None
@@ -115,7 +120,8 @@ async def parse_json_model_with_repair(
 需要修复的原始输出：
 {raw_content}
 """.strip()
-            repaired = await llm.ainvoke([
+            repair_llm = _observed_repair_llm(llm, attempt + 1, observation_context)
+            repaired = await repair_llm.ainvoke([
                 SystemMessage(content=secure_system_prompt(REPAIR_SYSTEM_PROMPT)),
                 HumanMessage(content=repair_prompt),
             ])
@@ -124,6 +130,22 @@ async def parse_json_model_with_repair(
     if last_error:
         raise last_error
     raise ValueError("LLM response must match the required JSON schema")
+
+
+def _observed_repair_llm(
+    model: Any,
+    attempt: int,
+    observation_context: dict[str, Any] | None,
+):
+    """为 JSON 修复器启用原生 JSON Output，并单独记录低复用请求。"""
+    context = observation_context or {}
+    return observe_llm(
+        bind_json_output(model),
+        operation="json_repair",
+        session_id=context.get("session_id"),
+        question_index=context.get("question_index"),
+        json_repair_attempt=attempt,
+    )
 
 
 def as_str(value: Any, default: str = "") -> str:

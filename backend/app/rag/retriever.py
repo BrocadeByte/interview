@@ -9,6 +9,7 @@ from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qmodels
 
 from app.core.config import settings
+from app.rag.context_format import estimate_context_tokens, format_knowledge_chunk
 from app.rag.embeddings import embed_text, embed_texts, embedding_signature, validate_embedding_settings
 from app.rag.reranker import RerankUnavailableError, rerank_documents
 
@@ -685,15 +686,11 @@ async def _expand_adjacent_chunks(chunks: list[dict]) -> list[dict]:
 
 
 def _apply_context_token_budget(chunks: list[dict], budget: int) -> list[dict]:
-    """为各智能体的知识上下文调用应用统一且可预期的词元预算。"""
+    """按最终一次 JSON 序列化后的完整知识文本应用预算。"""
     if budget <= 0:
         return []
-    remaining = budget
     selected: list[dict] = []
     for chunk in chunks:
-        if remaining <= 0:
-            break
-
         raw_segments = chunk.get("_context_segments") or [_context_segment(chunk, is_primary=True)]
         indexed_segments = list(enumerate(raw_segments))
         indexed_segments.sort(key=lambda item: (not bool(item[1].get("is_primary")), item[0]))
@@ -702,37 +699,112 @@ def _apply_context_token_budget(chunks: list[dict], budget: int) -> list[dict]:
         for original_index, raw_segment in indexed_segments:
             segment = dict(raw_segment)
             text = str(segment.pop("text", ""))
-            token_count = _estimate_tokens(text)
-            if token_count <= remaining:
-                segment["context_token_count"] = token_count
-                used.append((original_index, segment, text))
-                remaining -= token_count
+            if not text:
                 continue
-            truncated = _truncate_to_token_budget(text, remaining)
+            full_segment = {
+                **segment,
+                "context_token_count": _estimate_tokens(text),
+                "context_truncated": False,
+            }
+            candidate = _build_budgeted_chunk(chunk, [*used, (original_index, full_segment, text)])
+            if _formatted_context_token_count([*selected, candidate]) <= budget:
+                used.append((original_index, full_segment, text))
+                continue
+
+            truncated = _truncate_segment_for_final_budget(
+                text=text,
+                chunk=chunk,
+                selected=selected,
+                used=used,
+                original_index=original_index,
+                segment=segment,
+                budget=budget,
+            )
             if truncated:
                 used_token_count = _estimate_tokens(truncated)
                 segment["context_token_count"] = used_token_count
                 segment["context_truncated"] = True
                 used.append((original_index, segment, truncated))
-                remaining -= used_token_count
             chunk_truncated = True
             break
 
         if not used:
             break
-        used.sort(key=lambda item: item[0])
-        used_segments = [item[1] for item in used]
-        used_texts = [item[2] for item in used]
-        enriched = {key: value for key, value in chunk.items() if key != "_context_segments"}
-        enriched["text"] = "\n\n".join(used_texts).strip()
-        enriched["_context_chunks"] = used_segments
-        enriched["_context_token_count"] = sum(int(item["context_token_count"]) for item in used_segments)
-        if chunk_truncated:
-            enriched["_context_truncated"] = True
+        if len(used) < len(raw_segments):
+            chunk_truncated = True
+        enriched = _build_budgeted_chunk(chunk, used, truncated=chunk_truncated)
         selected.append(enriched)
         if chunk_truncated:
             break
     return selected
+
+
+def _build_budgeted_chunk(
+    chunk: dict,
+    used: list[tuple[int, dict, str]],
+    *,
+    truncated: bool = False,
+) -> dict:
+    """把已纳入预算的片段恢复为原始顺序，并生成引用所需元数据。"""
+    ordered = sorted(used, key=lambda item: item[0])
+    used_segments = [item[1] for item in ordered]
+    used_texts = [item[2] for item in ordered]
+    enriched = {key: value for key, value in chunk.items() if key != "_context_segments"}
+    enriched["text"] = "\n\n".join(used_texts).strip()
+    enriched["_context_chunks"] = used_segments
+    enriched["_context_token_count"] = sum(int(item["context_token_count"]) for item in used_segments)
+    if truncated:
+        enriched["_context_truncated"] = True
+    else:
+        enriched.pop("_context_truncated", None)
+    return enriched
+
+
+def _formatted_context_token_count(chunks: list[dict]) -> int:
+    """估算最终发送给模型的多条紧凑 JSON 知识文本总 Token。"""
+    formatted = "\n".join(
+        format_knowledge_chunk(index, chunk)
+        for index, chunk in enumerate(chunks, start=1)
+    )
+    return _estimate_tokens(formatted)
+
+
+def _truncate_segment_for_final_budget(
+    *,
+    text: str,
+    chunk: dict,
+    selected: list[dict],
+    used: list[tuple[int, dict, str]],
+    original_index: int,
+    segment: dict,
+    budget: int,
+) -> str:
+    """用二分法截正文，确保包含来源和 JSON 开销后的最终文本仍在预算内。"""
+    low = 0
+    high = len(text)
+    best = ""
+    while low <= high:
+        midpoint = (low + high) // 2
+        candidate_text = text[:midpoint].strip()
+        if not candidate_text:
+            low = midpoint + 1
+            continue
+        candidate_segment = {
+            **segment,
+            "context_token_count": _estimate_tokens(candidate_text),
+            "context_truncated": True,
+        }
+        candidate_chunk = _build_budgeted_chunk(
+            chunk,
+            [*used, (original_index, candidate_segment, candidate_text)],
+            truncated=True,
+        )
+        if _formatted_context_token_count([*selected, candidate_chunk]) <= budget:
+            best = candidate_text
+            low = midpoint + 1
+        else:
+            high = midpoint - 1
+    return best
 
 
 def _context_segment(chunk: dict, *, is_primary: bool) -> dict:
@@ -749,11 +821,8 @@ def _context_segment(chunk: dict, *, is_primary: bool) -> dict:
 
 
 def _estimate_tokens(text: str) -> int:
-    """按汉字逐字计数、其他文本每四个字符估算一个词元，估计上下文开销。"""
-    cjk = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
-    non_cjk = re.sub(r"[\u4e00-\u9fff]", "", text)
-    non_cjk_tokens = max(1, math.ceil(len(non_cjk) / 4)) if non_cjk else 0
-    return cjk + non_cjk_tokens
+    """复用最终知识格式的保守 Token 估算器。"""
+    return estimate_context_tokens(text)
 
 
 def _truncate_to_token_budget(text: str, budget: int) -> str:

@@ -5,6 +5,9 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
+MAX_INTERVIEW_ANSWER_CHARS = 8_000
+
+
 class InterviewCreate(BaseModel):
     target_position: str = Field(min_length=1, max_length=160)
     difficulty: str = Field(default="medium", pattern="^(easy|medium|hard)$")
@@ -26,7 +29,8 @@ class InterviewWarmup(BaseModel):
 
 
 class InterviewAnswer(BaseModel):
-    answer: str = Field(min_length=1)
+    # 8,000 字符足以容纳长篇口述回答，同时防止单轮输入无上限放大后续评分与报告请求。
+    answer: str = Field(min_length=1, max_length=MAX_INTERVIEW_ANSWER_CHARS)
     request_id: UUID
 
 

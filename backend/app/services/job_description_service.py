@@ -17,7 +17,8 @@ from app.schemas.job_description import (
 from app.services.analytics_service import record_analytics_event_safely
 from app.services.knowledge_file_service import normalize_extracted_text
 from app.services.llm_json import parse_json_model_with_repair
-from app.services.llm_service import llm
+from app.services.llm_service import bind_json_output, llm
+from app.services.llm_usage import observe_llm
 from app.services.prompt_security import format_untrusted_data, secure_system_prompt
 
 
@@ -157,7 +158,10 @@ async def parse_job_description_text(raw_text: str) -> ParsedJobDescription:
         "待解析 JD（UNTRUSTED DATA）：\n"
         f"{format_untrusted_data('job_description', normalized)}"
     )
-    response = await llm.ainvoke(
+    response = await observe_llm(
+        bind_json_output(llm),
+        operation="job_description_parse",
+    ).ainvoke(
         [
             SystemMessage(content=secure_system_prompt(JD_PARSE_SYSTEM_PROMPT)),
             HumanMessage(content=prompt),

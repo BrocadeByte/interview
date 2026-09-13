@@ -11,8 +11,9 @@ from app.services.llm_json import (
     parse_json_model_with_repair,
     parse_json_object,
 )
-from app.services.llm_service import llm
-from app.services.prompt_security import format_untrusted_data, secure_system_prompt
+from app.services.llm_service import bind_json_output, llm
+from app.services.llm_usage import observe_llm
+from app.services.prompt_security import format_untrusted_data, safe_knowledge_context, secure_system_prompt
 
 
 SYSTEM_PROMPT = """
@@ -26,7 +27,7 @@ SYSTEM_PROMPT = """
 6. learning_path 是后续学习路线列表，不能为空。
 7. sample_answer 给出一个针对本场最关键问题的完整优化示范回答，不能使用“无内容”等占位文本。
 8. 优先结合知识库里的岗位能力模型、评分标准和优秀回答样例。
-9. 各报告栏目必须参考后端结构化统计里的维度分、短板和建议。
+9. 各报告栏目必须参考后端结构化统计里的总分、维度分和考察重点，并结合逐题评分里的短板和建议。
 10. 必须输出 JSON，不要输出 Markdown。
 JSON 格式：
 {
@@ -46,8 +47,10 @@ async def generate_report(
     scores: list[dict],
     report_stats: dict,
     target_position: str,
+    *,
+    session_id: int | None = None,
 ) -> dict:
-    """检索岗位知识并调用模型生成复盘报告，补齐无效栏目后附上知识引用。"""
+    """检索岗位知识并用精简逐题评分生成最终报告；messages 仅兼容旧调用。"""
     current_dimension = str(scores[-1].get("dimension") or "") if scores else ""
     knowledge_result = await format_knowledge_context(
         query=f"{target_position} {current_dimension} 面试报告 评分标准",
@@ -58,22 +61,17 @@ async def generate_report(
     )
     knowledge_text, citations = unpack_knowledge_context(knowledge_result)
 
-    user_prompt = f"""
-面试问答记录：
-{format_untrusted_data("interview_records", messages)}
+    user_prompt = build_report_generation_prompt(
+        scores=scores,
+        report_stats=report_stats,
+        knowledge_text=knowledge_text,
+    )
 
-每题评分记录：
-{format_untrusted_data("score_records", scores)}
-
-后端结构化统计：
-{report_stats}
-
-请结合知识库中的岗位能力模型、评分标准和优秀回答样例，生成更贴近目标岗位的完整面试复盘报告。
-知识库参考：
-{format_untrusted_data("retrieved_knowledge_context", knowledge_text)}
-""".strip()
-
-    response = await llm.ainvoke([
+    response = await observe_llm(
+        bind_json_output(llm),
+        operation="report_generation",
+        session_id=session_id,
+    ).ainvoke([
         SystemMessage(content=secure_system_prompt(SYSTEM_PROMPT)),
         HumanMessage(content=user_prompt),
     ])
@@ -83,6 +81,7 @@ async def generate_report(
             llm=llm,
             output_model=InterviewReportOutput,
             max_retries=1,
+            observation_context={"session_id": session_id},
         )
         data = output.model_dump()
     except Exception:
@@ -100,6 +99,64 @@ async def generate_report(
     )
     report["citations"] = citations
     return report
+
+
+def build_report_score_records(scores: list[dict]) -> list[dict[str, Any]]:
+    """只保留会影响报告内容的逐题字段，移除数据库和检索元数据。"""
+    allowed_fields = (
+        "question_index",
+        "question",
+        "answer",
+        "dimension",
+        "score",
+        "sub_scores",
+        "reason",
+        "weaknesses",
+        "suggestions",
+    )
+    return [
+        {field: score.get(field) for field in allowed_fields if field in score}
+        for score in scores
+    ]
+
+
+def build_report_stats_prompt_context(report_stats: dict) -> dict[str, Any]:
+    """保留后端可信总分和维度结果，不重复逐题短板与建议。"""
+    dimensions = []
+    for item in as_list(report_stats.get("dimension_scores")):
+        if not isinstance(item, dict):
+            continue
+        dimensions.append(
+            {
+                field: item.get(field)
+                for field in ("dimension", "score", "question_indexes", "focus", "weight")
+                if field in item
+            }
+        )
+    return {
+        "total_score": report_stats.get("total_score"),
+        "dimension_scores": dimensions,
+    }
+
+
+def build_report_generation_prompt(
+    *,
+    scores: list[dict],
+    report_stats: dict,
+    knowledge_text: str,
+) -> str:
+    """构造问答只出现于精简评分记录中的报告提示。"""
+    return f"""
+每题评分记录：
+{format_untrusted_data("score_records", build_report_score_records(scores))}
+
+后端结构化统计：
+{format_untrusted_data("report_stats", build_report_stats_prompt_context(report_stats))}
+
+请结合知识库中的岗位能力模型、评分标准和优秀回答样例，生成更贴近目标岗位的完整面试复盘报告。
+知识库参考：
+{safe_knowledge_context(knowledge_text)}
+""".strip()
 
 
 def fallback_report(

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.knowledge import KnowledgeDocument, KnowledgeReindexJob
 from app.rag.document_loader import document_to_chunks
+from app.rag.context_format import format_knowledge_chunk
 from app.rag.retriever import (
     create_collection,
     delete_collection,
@@ -27,7 +28,6 @@ from app.schemas.citation import KnowledgeCitation, KnowledgeContextResult
 from app.schemas.knowledge import KnowledgeDocumentCreate, KnowledgeDocumentRead, KnowledgeDocumentUpdate, KnowledgeReindexResult
 from app.services.knowledge_file_service import get_document_parser, normalize_extracted_text
 from app.services.knowledge_quality import KnowledgeQualityError, validate_knowledge_text
-from app.services.prompt_security import format_untrusted_data
 from app.storage.oss_client import OssObjectStorage, build_knowledge_oss_key
 
 
@@ -623,27 +623,7 @@ async def format_knowledge_context(
     lines = []
     citations: list[KnowledgeCitation] = []
     for index, chunk in enumerate(chunks, start=1):
-        metadata = chunk.get("metadata") or {}
-        source_parts = [
-            f"title={chunk.get('title', 'Untitled')}",
-            f"category={chunk.get('category', 'Uncategorized')}",
-            f"position={chunk.get('target_position', 'Unknown position')}",
-            f"version={chunk.get('index_version', 1)}",
-        ]
-        if chunk.get("section_title") or metadata.get("section_title"):
-            source_parts.append(f"section={chunk.get('section_title') or metadata.get('section_title')}")
-        if chunk.get("source_page") or metadata.get("source_page"):
-            source_parts.append(f"page={chunk.get('source_page') or metadata.get('source_page')}")
-        lines.append(
-            format_untrusted_data(
-                "knowledge_base_chunk",
-                {
-                    "reference": index,
-                    "source": " | ".join(source_parts),
-                    "text": str(chunk.get("text") or chunk.get("content") or ""),
-                },
-            )
-        )
+        lines.append(format_knowledge_chunk(index, chunk))
         if with_citations:
             citations.append(_knowledge_citation(chunk, reference=index, query=query, purpose=purpose))
     result = KnowledgeContextResult(text="\n".join(lines), citations=citations)

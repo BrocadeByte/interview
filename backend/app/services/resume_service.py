@@ -32,6 +32,7 @@ from app.services.knowledge_file_service import (
     normalize_extracted_text,
 )
 from app.services.llm_json import parse_json_model_with_repair
+from app.services.llm_usage import observe_llm
 from app.services.prompt_security import format_untrusted_data, secure_system_prompt
 
 
@@ -311,7 +312,10 @@ async def parse_resume_text(raw_text: str) -> ResumeParseOutput:
     try:
         async with asyncio.timeout(settings.resume_parse_timeout_seconds):
             generation_started = time.perf_counter()
-            response = await parser_llm.ainvoke(
+            response = await observe_llm(
+                parser_llm,
+                operation="resume_parse",
+            ).ainvoke(
                 [
                     SystemMessage(content=secure_system_prompt(RESUME_PARSE_SYSTEM_PROMPT)),
                     HumanMessage(content=prompt),

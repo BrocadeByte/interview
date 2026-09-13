@@ -13,9 +13,10 @@ from app.schemas.llm_outputs import AnswerPipelineOutput
 from app.services.citation_service import normalize_citations
 from app.services.knowledge_service import format_knowledge_context, unpack_knowledge_context
 from app.services.llm_json import parse_json_model_with_repair
-from app.services.llm_service import llm
+from app.services.llm_service import bind_json_output, llm
 from app.services.llm_stream import invoke_json_with_streaming_field
-from app.services.prompt_security import format_untrusted_data, secure_system_prompt
+from app.services.llm_usage import observe_llm
+from app.services.prompt_security import format_untrusted_data, safe_knowledge_context, secure_system_prompt
 
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,61 @@ def build_fallback_question(target_position: str, dimension: str, focus: str) ->
     )
 
 
+def build_answer_pipeline_prompt(
+    *,
+    state: InterviewState,
+    answer: str,
+    history_text: str,
+    knowledge_text: str,
+    total_question_count: int,
+    current_dimension: str,
+    current_focus: str,
+    next_dimension: str,
+    next_focus: str,
+    mode_guidance: str,
+    followup_instruction: str,
+) -> str:
+    """按“会话稳定前缀 -> 本轮动态内容”构造回答分析提示。"""
+    mode = state.get("mode") or "training"
+    return f"""
+目标岗位：{state["target_position"]}
+面试难度：{state["difficulty"]}
+面试模式：{mode}
+模式反馈策略：{mode_guidance}
+面试类型：{state.get("interview_type", "mixed")}
+会话用途：{state.get("session_purpose", "full_interview")}
+来源短板 key：{format_untrusted_data("source_weakness_key", state.get("source_weakness_key"))}
+候选人画像：{format_untrusted_data("candidate_profile", state["profile"])}
+本场主问题数：{total_question_count}
+
+--- 本轮动态内容 ---
+当前题号：{state["current_question_index"]}
+当前考察维度：{current_dimension}
+当前计划考察重点：{current_focus}
+下一计划考察维度：{next_dimension}
+下一维度考察重点：{next_focus}
+当前追问次数：{state["follow_up_count"]}
+最大追问次数：{state["max_follow_up_count"]}
+
+当前面试问题：{format_untrusted_data("current_interview_question", state["current_question"])}
+
+候选人本轮回答：{format_untrusted_data("candidate_answer", answer)}
+
+本场面试中期记忆：
+{format_untrusted_data("interview_memory", state["medium_term_memory"])}
+
+短期记忆（已排除上面单独提供的最新一组问答）：
+{format_untrusted_data("interview_history", history_text)}
+
+知识库参考：
+{safe_knowledge_context(knowledge_text)}
+
+追问与下一题规则：{followup_instruction}
+
+请先判断是否追问并写出要展示的问题，再对本轮回答评分。
+""".strip()
+
+
 async def answer_pipeline_node(state: InterviewState) -> dict:
     """一次知识检索 + 一次模型调用，完成评分、追问判断和下一题生成。
 
@@ -119,6 +175,7 @@ async def answer_pipeline_node(state: InterviewState) -> dict:
         state["messages"],
         current_question_index=current_index,
         recent_limit=8,
+        exclude_latest_exchange=True,
     )
     # 一次检索同时服务评分标准和下一题素材。
     knowledge_query = (
@@ -156,46 +213,29 @@ async def answer_pipeline_node(state: InterviewState) -> dict:
         else "实战模式：追问和下一题保持中性、真实，不得在 question 中透露得分、答案、短板或改进建议；评分只在后台保存。"
     )
 
-    user_prompt = f"""
-目标岗位：{state["target_position"]}
-面试难度：{state["difficulty"]}
-面试模式：{mode}
-模式反馈策略：{mode_guidance}
-面试类型：{state.get("interview_type", "mixed")}
-会话用途：{state.get("session_purpose", "full_interview")}
-来源短板 key：{format_untrusted_data("source_weakness_key", state.get("source_weakness_key"))}
-当前题号：{current_index}（本场主问题数 {total_question_count}）
-当前考察维度：{current_dimension}
-当前计划考察重点：{current_plan_item["focus"]}
-下一计划考察维度：{next_dimension}
-下一维度考察重点：{next_focus}
-当前追问次数：{state["follow_up_count"]}
-最大追问次数：{state["max_follow_up_count"]}
-
-候选人画像：{format_untrusted_data("candidate_profile", state["profile"])}
-
-当前面试问题：{state["current_question"]}
-
-候选人本轮回答：{format_untrusted_data("candidate_answer", answer)}
-
-本场面试中期记忆：
-{format_untrusted_data("interview_memory", state["medium_term_memory"])}
-
-短期记忆（结构化历史问答）：
-{format_untrusted_data("interview_history", history_text)}
-
-知识库参考：
-{format_untrusted_data("retrieved_knowledge_context", knowledge_text)}
-
-追问与下一题规则：{followup_instruction}
-
-请先判断是否追问并写出要展示的问题，再对本轮回答评分。
-""".strip()
+    user_prompt = build_answer_pipeline_prompt(
+        state=state,
+        answer=answer,
+        history_text=history_text,
+        knowledge_text=knowledge_text,
+        total_question_count=total_question_count,
+        current_dimension=current_dimension,
+        current_focus=current_plan_item["focus"],
+        next_dimension=next_dimension,
+        next_focus=next_focus,
+        mode_guidance=mode_guidance,
+        followup_instruction=followup_instruction,
+    )
 
     decision_reason = "模型输出异常，默认不追问。"
     try:
         response = await invoke_json_with_streaming_field(
-            llm,
+            observe_llm(
+                bind_json_output(llm),
+                operation="answer_pipeline",
+                session_id=state["session_id"],
+                question_index=current_index,
+            ),
             [SystemMessage(content=secure_system_prompt(SYSTEM_PROMPT)), HumanMessage(content=user_prompt)],
             field="question",
             # 模型输出先完整校验并由 Service 提交；API 随后只流式发送权威问题。
@@ -206,6 +246,7 @@ async def answer_pipeline_node(state: InterviewState) -> dict:
             llm=llm,
             output_model=AnswerPipelineOutput,
             max_retries=1,
+            observation_context={"session_id": state["session_id"], "question_index": current_index},
         )
         decision_reason = output.decision_reason
         weaknesses = output.weaknesses

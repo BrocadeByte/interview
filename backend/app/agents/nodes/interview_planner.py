@@ -1,4 +1,7 @@
+import json
 import logging
+import re
+from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -7,9 +10,10 @@ from app.agents.state import InterviewPlanItem, InterviewState
 from app.schemas.llm_outputs import InterviewPlanOutput
 from app.services.knowledge_service import format_knowledge_context
 from app.services.llm_json import as_list, as_str, parse_json_model_with_repair
-from app.services.llm_service import llm
+from app.services.llm_service import bind_json_output, llm
 from app.services.llm_stream import invoke_json_with_streaming_field
-from app.services.prompt_security import format_untrusted_data, secure_system_prompt
+from app.services.llm_usage import observe_llm
+from app.services.prompt_security import format_untrusted_data, safe_knowledge_context, secure_system_prompt
 
 
 logger = logging.getLogger(__name__)
@@ -107,6 +111,147 @@ PURPOSE_GUIDANCE = {
     "weakness_practice": "专项练习：只围绕来源短板规划 4 个由基础到应用的问题，不重复来源原题文本。",
     "retest": "再测：只规划 2 个与来源短板能力点高度相似但题面不同的问题，不给提示，以便与原结果比较。",
 }
+
+
+RESUME_RAW_TEXT_FALLBACK_CHARS = 6_000
+JOB_RAW_TEXT_FALLBACK_CHARS = 5_000
+
+
+def build_resume_prompt_context(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    """从审计快照构造面试规划所需的最小简历视图。"""
+    if not isinstance(snapshot, dict):
+        return {}
+    parsed = snapshot.get("parsed")
+    if isinstance(parsed, dict):
+        parsed_view = {
+            key: parsed.get(key)
+            for key in (
+                "skills",
+                "education",
+                "projects",
+                "work_experience",
+                "experience_summary",
+            )
+            if parsed.get(key) not in (None, "", [])
+        }
+        if parsed_view:
+            return {"parsed": parsed_view}
+    raw_text = str(snapshot.get("raw_text") or "").strip()
+    if not raw_text:
+        return {}
+    return {
+        "raw_text": raw_text[:RESUME_RAW_TEXT_FALLBACK_CHARS],
+        "raw_text_truncated": len(raw_text) > RESUME_RAW_TEXT_FALLBACK_CHARS,
+    }
+
+
+def build_job_description_prompt_context(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    """从审计快照构造面试规划所需的最小 JD 视图。"""
+    if not isinstance(snapshot, dict):
+        return {}
+    parsed = snapshot.get("parsed")
+    if isinstance(parsed, dict):
+        parsed_view = {
+            key: parsed.get(key)
+            for key in (
+                "target_position",
+                "seniority",
+                "experience_requirements",
+                "must_have_skills",
+                "nice_to_have_skills",
+                "responsibilities",
+                "interview_focus",
+            )
+            if parsed.get(key) not in (None, "", [])
+        }
+        if parsed_view:
+            return {"parsed": parsed_view}
+    raw_text = str(snapshot.get("raw_text") or "").strip()
+    if not raw_text:
+        fallback_position = snapshot.get("target_position") or snapshot.get("position")
+        return {"target_position": fallback_position} if fallback_position else {}
+    return {
+        "target_position": snapshot.get("target_position") or snapshot.get("position"),
+        "raw_text": raw_text[:JOB_RAW_TEXT_FALLBACK_CHARS],
+        "raw_text_truncated": len(raw_text) > JOB_RAW_TEXT_FALLBACK_CHARS,
+    }
+
+
+def build_candidate_prompt_context(
+    profile: dict[str, Any],
+    resume_context: dict[str, Any],
+) -> dict[str, Any]:
+    """保留画像事实，并移除已被结构化简历完整覆盖的技能或项目副本。"""
+    candidate = {
+        key: value
+        for key, value in (profile or {}).items()
+        if value not in (None, "", [])
+    }
+    parsed = resume_context.get("parsed") if isinstance(resume_context, dict) else None
+    if isinstance(parsed, dict):
+        if _content_is_covered(candidate.get("skills"), parsed.get("skills")):
+            candidate.pop("skills", None)
+        if _content_is_covered(candidate.get("projects"), parsed.get("projects")):
+            candidate.pop("projects", None)
+    return candidate
+
+
+def build_interview_planner_prompt(
+    *,
+    state: InterviewState,
+    mode: str,
+    mode_guidance: str,
+    interview_type: str,
+    interview_type_label: str,
+    session_purpose: str,
+    purpose_guidance: str,
+    question_count: int,
+    knowledge_text: str,
+) -> str:
+    """构造只包含 LLM 规划必需数据的提示视图，不改变数据库审计快照。"""
+    resume_context = build_resume_prompt_context(state.get("resume"))
+    job_context = build_job_description_prompt_context(state.get("target_job"))
+    candidate_context = build_candidate_prompt_context(state["profile"], resume_context)
+    return f"""
+目标岗位：{state["target_position"]}
+面试难度：{state["difficulty"]}
+面试模式：{mode}
+模式反馈策略：{mode_guidance}
+面试类型：{interview_type}（{interview_type_label}）
+会话用途：{session_purpose}
+会话用途与题量规则：{purpose_guidance}
+本场主问题数：{question_count}
+来源短板 key：{format_untrusted_data("source_weakness_key", state.get("source_weakness_key"))}
+练习来源：{format_untrusted_data("practice_source_snapshot", state.get("practice_context"))}
+候选人画像：{format_untrusted_data("candidate_profile", candidate_context)}
+简历规划视图：{format_untrusted_data("resume_snapshot", resume_context)}
+JD 规划视图：{format_untrusted_data("job_description_snapshot", job_context)}
+
+知识库参考：
+{safe_knowledge_context(knowledge_text)}
+
+请严格按本场面试类型、模式和会话用途生成第一道面试问题，并规划总计 {question_count} 个主问题的考察维度。
+HR 不得生成纯技术八股题；项目深挖优先使用简历项目；技术基础优先覆盖 JD must-have 技能；系统设计必须结合候选人及 JD 年限控制难度。
+必须先输出 question 字段，再输出 plan 字段。
+""".strip()
+
+
+def _content_is_covered(value: Any, structured: Any) -> bool:
+    """判断画像文本中的各个事实片段是否已存在于结构化简历。"""
+    if value in (None, "", []) or structured in (None, "", []):
+        return False
+    source_atoms = [
+        _normalize_overlap_text(item)
+        for item in re.split(r"[,，;；\n]+", str(value))
+        if _normalize_overlap_text(item)
+    ]
+    target = _normalize_overlap_text(json.dumps(structured, ensure_ascii=False, default=str))
+    return bool(source_atoms) and all(atom in target for atom in source_atoms)
+
+
+def _normalize_overlap_text(value: str) -> str:
+    """去除空白并统一大小写，供重复事实比较使用。"""
+    return "".join(str(value or "").split()).casefold()
 
 
 TYPE_DEFAULT_INTERVIEW_PLANS: dict[str, list[InterviewPlanItem]] = {
@@ -244,30 +389,17 @@ async def plan_interview_node(state: InterviewState) -> dict:
         target_position=state["target_position"],
         purpose="planning",
     )
-    user_prompt = f"""
-目标岗位：{state["target_position"]}
-面试难度：{state["difficulty"]}
-面试模式：{mode}
-模式反馈策略：{mode_guidance}
-面试类型：{interview_type}（{interview_type_label}）
-会话用途：{session_purpose}
-会话用途与题量规则：{purpose_guidance}
-本场主问题数：{question_count}
-来源会话 ID：{state.get("parent_session_id")}
-来源报告 ID：{state.get("source_report_id")}
-来源短板 key：{format_untrusted_data("source_weakness_key", state.get("source_weakness_key"))}
-练习来源快照：{format_untrusted_data("practice_source_snapshot", state.get("practice_context"))}
-候选人画像：{format_untrusted_data("candidate_profile", state["profile"])}
-本场简历快照：{format_untrusted_data("resume_snapshot", state.get("resume"))}
-本场 JD 快照：{format_untrusted_data("job_description_snapshot", state["target_job"])}
-
-知识库参考：
-{format_untrusted_data("retrieved_knowledge_context", knowledge_text)}
-
-请严格按本场面试类型、模式和会话用途生成第一道面试问题，并规划总计 {question_count} 个主问题的考察维度。
-HR 不得生成纯技术八股题；项目深挖优先使用简历项目；技术基础优先覆盖 JD must-have 技能；系统设计必须结合候选人及 JD 年限控制难度。
-必须先输出 question 字段，再输出 plan 字段。
-""".strip()
+    user_prompt = build_interview_planner_prompt(
+        state=state,
+        mode=mode,
+        mode_guidance=mode_guidance,
+        interview_type=interview_type,
+        interview_type_label=interview_type_label,
+        session_purpose=session_purpose,
+        purpose_guidance=purpose_guidance,
+        question_count=question_count,
+        knowledge_text=str(knowledge_text),
+    )
 
     fallback_question = build_fallback_question(
         interview_type=interview_type,
@@ -277,7 +409,12 @@ HR 不得生成纯技术八股题；项目深挖优先使用简历项目；技�
 
     try:
         response = await invoke_json_with_streaming_field(
-            llm,
+            observe_llm(
+                bind_json_output(llm),
+                operation="interview_planner",
+                session_id=state["session_id"],
+                question_index=state["current_question_index"],
+            ),
             [SystemMessage(content=secure_system_prompt(SYSTEM_PROMPT)), HumanMessage(content=user_prompt)],
             field="question",
             # 首题与计划提交后再流式发送，避免草稿与权威会话状态不一致。
@@ -288,6 +425,10 @@ HR 不得生成纯技术八股题；项目深挖优先使用简历项目；技�
             llm=llm,
             output_model=InterviewPlanOutput,
             max_retries=1,
+            observation_context={
+                "session_id": state["session_id"],
+                "question_index": state["current_question_index"],
+            },
         )
         plan = normalize_interview_plan(
             [item.model_dump() for item in output.plan],

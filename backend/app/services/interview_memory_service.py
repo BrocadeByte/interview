@@ -1,52 +1,14 @@
 import json
 import logging
 
-from langchain_core.messages import HumanMessage, SystemMessage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.interview import InterviewMemory, InterviewMessage, InterviewSession
 from app.models.score import InterviewScore
-from app.schemas.llm_outputs import InterviewMemoryOutput
-from app.services.llm_json import parse_json_model_with_repair
-from app.services.llm_service import llm
-from app.services.prompt_security import format_untrusted_data, secure_system_prompt
 
 
 logger = logging.getLogger(__name__)
-
-
-SYSTEM_PROMPT = """
-你是一个面试过程记忆整理器。你要把一段较早的面试问答压缩进本场面试的中期记忆。
-要求：
-1. 保留已考察主题、候选人表现、优势、短板、后续关注点。
-2. 合并已有摘要和新增问答，不要重复堆砌原始问答。
-3. 摘要要服务于后续提问、追问和评分，优先保留有判断价值的信息。
-4. 必须输出 JSON，不要输出 Markdown。
-JSON 格式：{
-  "summary": "更新后的本场面试摘要",
-  "covered_topics": ["已覆盖主题"],
-  "strengths": ["优势"],
-  "weaknesses": ["短板"],
-  "next_focus": ["后续关注点"]
-}
-""".strip()
-
-
-QUESTION_SUMMARY_PROMPT = """
-你是一个面试过程记忆整理器。你要把本场面试中已经完成的一个主问题链路总结进中期记忆。
-要求：
-1. 保留已考察主题、候选人表现、优势、短板、后续关注点。
-2. 不要重复堆砌原始问答，要压缩成可供后续提问和评分使用的摘要。
-3. 必须输出 JSON，不要输出 Markdown。
-JSON 格式：{
-  "summary": "更新后的本场面试摘要",
-  "covered_topics": ["已覆盖主题"],
-  "strengths": ["优势"],
-  "weaknesses": ["短板"],
-  "next_focus": ["后续关注点"]
-}
-""".strip()
 
 
 MEMORY_TRIGGER_CHARS = 6000
@@ -112,40 +74,26 @@ async def maybe_compact_medium_term_memory(
     compact_until_id = max(message.id for message in compact_messages)
     question_indexes = sorted({message.question_index for message in compact_messages})
 
-    user_prompt = f"""
-目标岗位：{session.target_position}
-面试难度：{session.difficulty}
-
-已有本场面试中期记忆：
-{format_untrusted_data("existing_interview_memory", previous_summary)}
-
-本次需要压缩进中期记忆的较早问答：
-{format_untrusted_data("interview_history", compact_text)}
-
-请输出更新后的本场面试中期记忆。
-""".strip()
-
-    try:
-        response = await llm.ainvoke([
-            SystemMessage(content=secure_system_prompt(SYSTEM_PROMPT)),
-            HumanMessage(content=user_prompt),
-        ])
-        output = await parse_json_model_with_repair(
-            response.content,
-            llm=llm,
-            output_model=InterviewMemoryOutput,
-            max_retries=1,
+    scores = list(
+        await db.scalars(
+            select(InterviewScore)
+            .where(
+                InterviewScore.session_id == session.id,
+                InterviewScore.question_index.in_(question_indexes),
+            )
+            .order_by(InterviewScore.question_index.asc(), InterviewScore.created_at.asc())
         )
-        data = output.model_dump()
-    except Exception as exc:
-        logger.warning(
-            "memory.medium.compact_failed session_id=%s compact_until_message_id=%s error=%r",
+    )
+    scored_indexes = {score.question_index for score in scores}
+    if not set(question_indexes).issubset(scored_indexes):
+        logger.info(
+            "memory.medium.skip reason=missing_structured_scores session_id=%s question_indexes=%s",
             session.id,
-            compact_until_id,
-            exc,
+            question_indexes,
         )
         return
 
+    data = build_memory_from_scores(scores, previous_summary=previous_summary)
     summary = str(data.get("summary") or previous_summary)
     metadata = {
         **data,
@@ -216,54 +164,12 @@ async def update_medium_term_memory(
     if not question_messages:
         logger.info("memory.medium.skip reason=no_question_messages session_id=%s question_index=%s", session.id, question_index)
         return
+    if latest_score is None:
+        logger.info("memory.medium.skip reason=no_structured_score session_id=%s question_index=%s", session.id, question_index)
+        return
 
     previous_summary = await get_session_memory_summary(db, session.id)
-    thread_text = format_question_thread(question_messages)
-    score_text = format_score(latest_score)
-
-    user_prompt = f"""
-目标岗位：{session.target_position}
-面试难度：{session.difficulty}
-已存在的本场面试摘要：
-{format_untrusted_data("existing_interview_memory", previous_summary)}
-
-刚完成的第 {question_index} 题问答链路：
-{format_untrusted_data("interview_history", thread_text)}
-
-本题最新评分：
-{score_text}
-
-请输出更新后的本场面试中期记忆。
-""".strip()
-
-    response = None
-    try:
-        response = await llm.ainvoke([
-            SystemMessage(content=secure_system_prompt(QUESTION_SUMMARY_PROMPT)),
-            HumanMessage(content=user_prompt),
-        ])
-        output = await parse_json_model_with_repair(
-            response.content,
-            llm=llm,
-            output_model=InterviewMemoryOutput,
-            max_retries=1,
-        )
-        data = output.model_dump()
-    except Exception as exc:
-        logger.warning(
-            "memory.medium.parse_failed session_id=%s question_index=%s error=%s raw=%r",
-            session.id,
-            question_index,
-            exc,
-            str(response.content)[:1000] if response is not None else "",
-        )
-        data = {
-            "summary": previous_summary,
-            "covered_topics": [],
-            "strengths": [],
-            "weaknesses": [],
-            "next_focus": ["本题中期记忆解析失败，后续可根据原始问答和评分继续追问。"],
-        }
+    data = build_memory_from_scores([latest_score], previous_summary=previous_summary)
     summary = str(data.get("summary") or previous_summary)
 
     db.add(
@@ -298,6 +204,70 @@ async def update_medium_term_memory(
         )
     await db.flush()
     logger.info("memory.medium.updated session_id=%s question_index=%s summary_preview=%r", session.id, question_index, summary[:200])
+
+
+def build_memory_from_scores(
+    scores: list[InterviewScore],
+    *,
+    previous_summary: str,
+) -> dict[str, object]:
+    """依据已保存评分生成确定性中期记忆，不重复发送原始问答给模型。"""
+    covered_topics = _unique_non_empty([score.dimension for score in scores])
+    strengths = _unique_non_empty(
+        [
+            f"{score.dimension}（{score.score} 分）：{score.reason[:300]}"
+            for score in scores
+            if score.score >= 75 and score.reason
+        ]
+    )
+    weaknesses = _unique_non_empty(
+        [item for score in scores for item in _json_string_list(score.weaknesses)]
+    )
+    suggestions = _unique_non_empty(
+        [item for score in scores for item in _json_string_list(score.suggestions)]
+    )
+    score_summaries = [
+        f"第 {score.question_index} 题（{score.dimension}）{score.score} 分：{score.reason[:300]}"
+        for score in scores
+    ]
+    parts = []
+    if previous_summary and previous_summary != "暂无本场面试摘要。":
+        parts.append(previous_summary)
+    parts.extend(score_summaries)
+    return {
+        "summary": "\n".join(_unique_non_empty(parts)) or "暂无本场面试摘要。",
+        "covered_topics": covered_topics,
+        "strengths": strengths,
+        "weaknesses": weaknesses,
+        "next_focus": suggestions,
+        "source": "structured_scores",
+    }
+
+
+def _json_string_list(value: str | None) -> list[str]:
+    """把评分 JSON 列表安全恢复为文本列表，损坏值不进入记忆。"""
+    if not value:
+        return []
+    try:
+        data = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item).strip() for item in data if str(item).strip()]
+
+
+def _unique_non_empty(values: list[str]) -> list[str]:
+    """按原顺序去除空文本和重复项。"""
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        normalized = str(value or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
 
 
 def format_question_thread(messages: list[InterviewMessage]) -> str:

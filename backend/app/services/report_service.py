@@ -111,7 +111,7 @@ def _owned_final_report_query(report_id: int, user_id: int):
 
 
 async def get_or_create_report(db: AsyncSession, session_id: int) -> InterviewReportRead:
-    """进行中会话每次按当前评分生成非持久化预览；完整面试结束后才保存最终快照。"""
+    """进行中会话使用确定性预览；完整面试结束后才调用模型并保存最终快照。"""
     session = await db.get(InterviewSession, session_id)
     if session is None:
         raise ValueError(f"Interview session {session_id} does not exist")
@@ -122,14 +122,13 @@ async def get_or_create_report(db: AsyncSession, session_id: int) -> InterviewRe
         await ensure_question_reviews(db, existing)
         return _report_to_read(existing)
 
-    messages = await _list_messages(db, session_id)
     scores = [score.model_dump() for score in await list_scores(db, session_id)]
     report_stats = build_report_stats(session, scores)
-    report_data = await generate_report(messages, scores, report_stats, session.target_position)
     score_citations = [citation for score in scores for citation in score.get("citations") or []]
-    citations = merge_citations(score_citations, report_data.get("citations"))
 
     if not is_final_report_session(session):
+        report_data = fallback_report(scores, report_stats, session.target_position)
+        citations = merge_citations(score_citations)
         now = datetime.utcnow()
         return InterviewReportRead(
             id=None,
@@ -149,6 +148,14 @@ async def get_or_create_report(db: AsyncSession, session_id: int) -> InterviewRe
             updated_at=now,
         )
 
+    report_data = await generate_report(
+        [],
+        scores,
+        report_stats,
+        session.target_position,
+        session_id=session_id,
+    )
+    citations = merge_citations(score_citations, report_data.get("citations"))
     report = existing or InterviewReport(session_id=session_id)
     if existing is not None and not bool(existing.is_final):
         report.created_at = datetime.utcnow()

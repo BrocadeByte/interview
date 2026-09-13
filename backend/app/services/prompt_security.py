@@ -12,8 +12,8 @@ SECURITY BOUNDARY (HIGHEST PRIORITY):
 
 
 def secure_system_prompt(prompt: str) -> str:
-    """在系统提示后追加不可信数据处理规则，明确外部内容的使用边界。"""
-    return f"{prompt.strip()}\n\n{UNTRUSTED_DATA_SYSTEM_RULES}"
+    """以稳定的最高优先级安全边界作为所有节点的共同系统前缀。"""
+    return f"{UNTRUSTED_DATA_SYSTEM_RULES}\n\n{prompt.strip()}"
 
 
 def format_untrusted_data(source: str, content: Any) -> str:
@@ -24,6 +24,33 @@ def format_untrusted_data(source: str, content: Any) -> str:
             "source": source,
             "content": content,
         },
-        ensure_ascii=True,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
         default=str,
+    )
+
+
+def safe_knowledge_context(content: str) -> str:
+    """已按分块标记的知识上下文直接复用，其他替身文本则补一次边界。"""
+    text = str(content or "")
+    if not text or text == "No relevant knowledge base content.":
+        return text
+    lines = [line for line in text.splitlines() if line.strip()]
+    if lines and all(_is_knowledge_chunk_boundary(line) for line in lines):
+        return text
+    return format_untrusted_data("retrieved_knowledge_context", text)
+
+
+def _is_knowledge_chunk_boundary(value: str) -> bool:
+    """验证单行是否为知识服务生成的合法不可信分块边界。"""
+    try:
+        data = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(data, dict)
+        and data.get("data_classification") == "UNTRUSTED"
+        and data.get("source") == "knowledge_base_chunk"
+        and isinstance(data.get("content"), dict)
     )

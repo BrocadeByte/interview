@@ -50,23 +50,31 @@ async def invoke_json_with_streaming_field(
 ) -> Any:
     """收集模型流并按需发布指定 JSON 字符串字段的临时文本；其余 JSON 与评分字段保留在缓冲区，临时增量须在结构和业务校验及数据库提交后与已提交文本核对。"""
     callback = _stream_delta_callback.get()
-    if callback is None:
+    ainvoke = getattr(llm, "ainvoke", None)
+    if (callback is None or not stream_field) and callable(ainvoke):
         return await llm.ainvoke(messages)
 
+    publish_drafts = callback is not None and stream_field
+
+    stream_llm = (
+        llm.bind(stream_options={"include_usage": True})
+        if callable(getattr(llm, "bind", None))
+        else llm
+    )
     chunks: list[str] = []
     published = ""
-    async for chunk in llm.astream(messages):
+    async for chunk in stream_llm.astream(messages):
         text = _content_to_text(chunk.content)
         if text:
             chunks.append(text)
-        if not stream_field:
+        if not publish_drafts:
             continue
 
         extracted = extract_json_string_field("".join(chunks), field)[:MAX_STREAMED_FIELD_CHARS]
         if not extracted.startswith(published):
             # 正常追加式模型输出应让字段单调增长；供应商行为异常时停止草稿推送，
             # 最终由提交后的 text_done 安全校正。
-            stream_field = False
+            publish_drafts = False
             continue
         delta = extracted[len(published) :]
         if delta:
