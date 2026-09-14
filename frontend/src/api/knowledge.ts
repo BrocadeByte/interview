@@ -39,6 +39,59 @@ export interface KnowledgeIngestionTask {
   finished_at: string | null
 }
 
+export interface RetrievalEvaluationCasePayload {
+  case_id?: string
+  query: string
+  reference?: string
+  reference_document_ids: number[]
+  target_position?: string
+  categories: string[]
+  include_general: boolean
+}
+
+export interface RetrievalMetricScores {
+  context_precision: number | null
+  context_recall: number | null
+  id_context_precision: number | null
+  id_context_recall: number | null
+  hit_rate: number | null
+  mrr: number | null
+}
+
+export interface RetrievedContext {
+  rank: number
+  document_id: number
+  title: string
+  chunk_id: string
+  chunk_index: number
+  content_preview: string
+  retrieval_score: number
+  retrieval_routes: string[]
+  relevant: boolean | null
+}
+
+export interface RetrievalEvaluationCaseResult {
+  case_id: string
+  query: string
+  reference: string | null
+  reference_document_ids: number[]
+  metrics: RetrievalMetricScores
+  retrieved_contexts: RetrievedContext[]
+  metric_errors: Record<string, string>
+  duration_ms: number
+}
+
+export interface RetrievalEvaluationResult {
+  framework: string
+  framework_version: string
+  evaluator_model: string | null
+  top_k: number
+  case_count: number
+  metrics: RetrievalMetricScores
+  cases: RetrievalEvaluationCaseResult[]
+  duration_ms: number
+}
+
 export function fetchKnowledgeDocuments() { return apiClient.get<KnowledgeDocument[]>('/knowledge/documents') }
 export function createKnowledgeDocument(data: KnowledgeDocumentPayload) { return apiClient.post<KnowledgeDocument>('/knowledge/documents', data) }
 export function updateKnowledgeDocument(id: number, data: KnowledgeDocumentPayload) { return apiClient.put<KnowledgeDocument>(`/knowledge/documents/${id}`, data) }
@@ -57,3 +110,7 @@ export function fetchIngestionTasks() { return apiClient.get<KnowledgeIngestionT
 export function fetchIngestionTask(id: number) { return apiClient.get<KnowledgeIngestionTask>(`/knowledge/ingestion-tasks/${id}`) }
 export function retryIngestionTask(id: number) { return apiClient.post<KnowledgeIngestionTask>(`/knowledge/ingestion-tasks/${id}/retry`) }
 export function reexecuteIngestionTask(id: number) { return apiClient.post<KnowledgeIngestionTask>(`/knowledge/ingestion-tasks/${id}/reexecute`) }
+
+export function evaluateKnowledgeRetrieval(data: { cases: RetrievalEvaluationCasePayload[]; top_k: number }) {
+  return apiClient.post<RetrievalEvaluationResult>('/knowledge/evaluations/retrieval', data)
+}

@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     rag_rerank_limit: int = 8
     rag_adjacent_chunk_window: int = 1
     rag_context_token_budget: int = 6000
+    ragas_evaluator_model: str = ""
+    ragas_evaluation_timeout_seconds: int = 120
+    ragas_max_concurrency: int = 2
     aliyun_oss_region: str = ""
     aliyun_oss_bucket: str = ""
     aliyun_oss_endpoint: str = ""

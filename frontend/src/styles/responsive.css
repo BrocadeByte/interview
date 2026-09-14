@@ -854,6 +854,30 @@
     grid-column: 1 / -1;
     justify-content: flex-start;
   }
+
+  .evaluation-form-grid,
+  .evaluation-score-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .evaluation-toolbar {
+    align-items: stretch;
+  }
+
+  .evaluation-toolbar > div,
+  .evaluation-toolbar > .el-button,
+  .top-k-control {
+    width: 100%;
+  }
+
+  .top-k-control {
+    justify-content: space-between;
+  }
+
+  .evaluation-result-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 
 @media (max-width: 480px) {

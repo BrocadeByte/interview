@@ -37,6 +37,7 @@
 - 支持引用溯源、相邻分块扩展和上下文 Token 预算；
 - 通过 RabbitMQ 异步执行文档索引与重建任务；
 - 可选使用阿里云 OSS 保存知识库原文件。
+- 集成 Ragas 检索评测，在管理端查看 Context Precision / Recall、ID Precision / Recall、Hit@K 和 MRR。
 
 ## 系统架构
 
@@ -168,6 +169,16 @@ cd frontend
 npm ci
 npm run build
 ```
+
+## 检索质量评测
+
+管理员进入“知识库管理 → 检索评测”后，可以创建最多 20 条评测样本并运行当前的完整检索链路。
+
+- 填写“标准答案”：Ragas 使用评审模型计算 Context Precision 和 Context Recall；
+- 选择“相关文档”：Ragas 计算确定性 ID Precision / Recall，同时给出 Hit@K 和 MRR；
+- 建议每条样本同时提供两种标注，用于发现“文档命中但具体分块不好”等问题。
+
+语义评测默认复用 `OPENAI_MODEL`。生产环境可通过 `RAGAS_EVALUATOR_MODEL` 单独指定更稳定或成本更低的评审模型，并用 `RAGAS_EVALUATION_TIMEOUT_SECONDS` 和 `RAGAS_MAX_CONCURRENCY` 控制超时与并发。评测分数为 0–1，应用固定评测集观察迭代前后的相对变化，不宜把单一阈值当作绝对质量结论。
 
 ## 安全说明
 

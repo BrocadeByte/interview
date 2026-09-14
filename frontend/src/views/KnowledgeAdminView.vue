@@ -29,6 +29,7 @@ import 'element-plus/theme-chalk/el-upload.css'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 
 import { getApiErrorMessage } from '../api/client'
+import RetrievalEvaluationPanel from '../components/knowledge/RetrievalEvaluationPanel.vue'
 import {
   createKnowledgeDocument,
   deleteKnowledgeDocument,
@@ -236,6 +237,7 @@ function stageLabel(stage: string) { return ({ queued: '排队中', parsing: '�
               <div class="upload-panel"><el-form label-position="top"><div class="knowledge-form-grid"><el-form-item label="标题"><el-input v-model="uploadForm.title" placeholder="留空时使用文件名" /></el-form-item><el-form-item label="分类"><el-select v-model="uploadForm.category" placeholder="选择知识用途"><el-option v-for="category in knowledgeCategories" :key="category" :label="category" :value="category" /></el-select></el-form-item><el-form-item label="适用岗位" class="span-2"><el-input v-model="uploadForm.target_position" /></el-form-item></div></el-form><el-upload drag :auto-upload="false" :limit="1" :before-upload="beforeUpload" :on-change="onUploadChange" :on-remove="onUploadRemove" accept=".txt,.md,.pdf"><div class="el-upload__text">将文件拖到此处，或点击选择文件</div><template #tip><div class="el-upload__tip">支持 txt、md 和 pdf，文件大小不超过 10MB。</div></template></el-upload><div class="editor-actions"><el-button type="primary" :loading="uploading" @click="submitUpload">提交异步入库</el-button></div></div>
             </el-tab-pane>
             <el-tab-pane label="入库任务"><div class="ingestion-task-panel"><div class="task-panel-header"><strong>异步入库队列</strong><el-button text :loading="taskLoading" @click="loadTasks">刷新任务</el-button></div><el-empty v-if="!tasks.length" description="暂无入库任务" /><div v-for="task in tasks" :key="task.id" class="ingestion-task-row"><div class="task-main"><strong>#{{ task.id }} {{ task.title }}</strong><small>{{ task.file_name }} · {{ stageLabel(task.stage) }} · 尝试 {{ task.attempts }}/{{ task.max_attempts }}</small><span v-if="task.error" class="task-error">{{ task.error }}</span></div><el-tag :type="statusType(task.status)">{{ task.status }}</el-tag><div class="task-actions"><el-button v-if="['failed', 'dead', 'publish_failed'].includes(task.status)" size="small" @click="retryTask(task, false)">重试</el-button><el-button v-if="['failed', 'dead', 'publish_failed', 'succeeded'].includes(task.status)" size="small" type="primary" plain @click="retryTask(task, true)">重新执行</el-button></div></div></div></el-tab-pane>
+            <el-tab-pane label="检索评测"><retrieval-evaluation-panel :documents="documents" /></el-tab-pane>
           </el-tabs>
         </section>
       </div>

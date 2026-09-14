@@ -12,6 +12,8 @@ from app.schemas.knowledge import (
     KnowledgeDocumentUpdate,
     KnowledgeReindexResult,
 )
+from app.schemas.rag_evaluation import RetrievalEvaluationRequest, RetrievalEvaluationResult
+from app.services.rag_evaluation_service import RagasUnavailableError, evaluate_retrieval
 from app.services.knowledge_file_service import build_document_from_upload
 from app.services.knowledge_service import (
     KnowledgeDataQualityError,
@@ -30,6 +32,19 @@ from app.services.knowledge_service import (
 
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
+
+
+@router.post("/evaluations/retrieval", response_model=RetrievalEvaluationResult)
+async def run_retrieval_evaluation(
+    payload: RetrievalEvaluationRequest,
+    current_user: User = Depends(get_current_admin_user),
+) -> RetrievalEvaluationResult:
+    """使用 Ragas 运行管理员提交的检索评测集，返回汇总与逐条明细。"""
+    del current_user
+    try:
+        return await evaluate_retrieval(payload)
+    except RagasUnavailableError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
 
 # 创建一篇知识库文档。
